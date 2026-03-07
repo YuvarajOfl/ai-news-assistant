@@ -166,7 +166,7 @@ Contributions are welcome!
 
 **Yuvaraj T**
 - GitHub: [@YuvarajOfl](https://github.com/YuvarajOfl)
-- LinkedIn: [Yuvaraj T](https://linkedin.com/in/yuvaraj-t)
+- LinkedIn: [Yuvaraj T](www.linkedin.com/in/yuvaraj8)
 
 ---
 
