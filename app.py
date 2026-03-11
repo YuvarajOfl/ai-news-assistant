@@ -373,13 +373,32 @@ def db_count():
 # ─────────────────────────────────────────────────────────────────────────────
 def esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace('"','&quot;')
 
-def _clean_text(text: str) -> str:
-    """Strip HTML tags, decode HTML entities, remove junk."""
-    if not text: return ""
+def _decode_entities(text: str) -> str:
+    """Decode all HTML entities including numeric ones like &#8216; &#8217; &#8220; &#8221;"""
+    # Named entities
     text = (text.replace("&lt;","<").replace("&gt;",">").replace("&amp;","&")
-                .replace("&quot;",'"').replace("&#39;","'").replace("&nbsp;"," "))
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"https?://\S+", "", text)
+                .replace("&quot;",'"').replace("&#39;","'").replace("&nbsp;"," ")
+                .replace("&mdash;","—").replace("&ndash;","–").replace("&hellip;","…")
+                .replace("&lsquo;","'").replace("&rsquo;","'")
+                .replace("&ldquo;",'"').replace("&rdquo;",'"'))
+    # Decimal numeric entities &#8216; &#8217; etc
+    def _num(m):
+        try: return chr(int(m.group(1)))
+        except: return ""
+    text = re.sub(r"&#(\d+);", _num, text)
+    # Hex numeric entities &#x2019; etc
+    def _hex(m):
+        try: return chr(int(m.group(1), 16))
+        except: return ""
+    text = re.sub(r"&#x([0-9a-fA-F]+);", _hex, text)
+    return text
+
+def _clean_text(text: str) -> str:
+    """Decode HTML entities, strip tags, remove junk."""
+    if not text: return ""
+    text = _decode_entities(text)
+    text = re.sub(r"<[^>]+>", "", text)           # strip HTML tags
+    text = re.sub(r"https?://\S+", "", text)       # remove leaked URLs
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -532,12 +551,12 @@ def _parse_rss(url: str, limit: int = 10) -> list:
                 m = re.search(rf"<{t}[^>]*>(.*?)</{t}>", item, re.DOTALL)
                 return m.group(1).strip() if m else ""
 
-            title = tag("title")
+            title = _decode_entities(tag("title"))
             link  = tag("link") or tag("guid")
-            desc  = re.sub(r"<[^>]+>", "", tag("description"))
+            desc  = _clean_text(tag("description"))
             pub   = tag("pubDate")
             src_m = re.search(r"<source[^>]*>(.*?)</source>", item, re.DOTALL)
-            src   = src_m.group(1).strip() if src_m else (
+            src   = _decode_entities(src_m.group(1).strip()) if src_m else (
                     re.search(r"https?://(?:www\.)?([^/]+)", link or "").group(1)
                     if link else "RSS Feed")
 
@@ -564,18 +583,30 @@ def _parse_rss(url: str, limit: int = 10) -> list:
     except Exception:
         return []
 
-def _fetch_og_image(url: str) -> str:
-    """Fetch og:image meta tag from an article page. Returns image URL or ''."""
+def _resolve_url(url: str) -> str:
+    """Follow redirects to get the real article URL (e.g. Google News wraps links)."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsAssistant/1.0)"}
-        r = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+        r = requests.head(url, headers=headers, timeout=5,
+                          allow_redirects=True, stream=False)
+        return r.url if r.url else url
+    except Exception:
+        return url
+
+def _fetch_og_image(url: str) -> str:
+    """Resolve redirect → fetch og:image / twitter:image from article page."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsAssistant/1.0)"}
+        # Follow redirects (Google News wraps in news.google.com/rss/articles/...)
+        real_url = _resolve_url(url)
+        r = requests.get(real_url, headers=headers, timeout=6, allow_redirects=True)
         if r.status_code != 200: return ""
-        # Only search first 10KB to stay fast
-        chunk = r.text[:10000]
+        chunk = r.text[:12000]
         for pattern in [
             r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
         ]:
             m = re.search(pattern, chunk, re.IGNORECASE)
             if m:
@@ -942,4 +973,3 @@ with tab_saved:
                     f'<div class="stat-chip"><strong>Persistent</strong><span>SQLite</span></div>'
                     f'</div>', unsafe_allow_html=True)
         render_grid(saved, cols=3, pfx="sv")
-
