@@ -373,10 +373,21 @@ def db_count():
 # ─────────────────────────────────────────────────────────────────────────────
 def esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace('"','&quot;')
 
+def _clean_text(text: str) -> str:
+    """Strip HTML tags, decode HTML entities, remove junk."""
+    if not text: return ""
+    text = (text.replace("&lt;","<").replace("&gt;",">").replace("&amp;","&")
+                .replace("&quot;",'"').replace("&#39;","'").replace("&nbsp;"," "))
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
 def summarize(text):
     if not text: return "No description available."
-    text = re.sub(r"\s*\[\+\d+ chars\]$","",text).strip()
-    s = [x.strip() for x in re.split(r"(?<=[.!?])\s+",text) if x.strip()]
+    text = _clean_text(text)
+    text = re.sub(r"\s*\[\+\d+ chars\]$", "", text).strip()
+    s = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 10]
     return " ".join(s[:2]) or "No description available."
 
 def fmt_date(iso):
@@ -553,9 +564,53 @@ def _parse_rss(url: str, limit: int = 10) -> list:
     except Exception:
         return []
 
+def _fetch_og_image(url: str) -> str:
+    """Fetch og:image meta tag from an article page. Returns image URL or ''."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; NewsAssistant/1.0)"}
+        r = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+        if r.status_code != 200: return ""
+        # Only search first 10KB to stay fast
+        chunk = r.text[:10000]
+        for pattern in [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        ]:
+            m = re.search(pattern, chunk, re.IGNORECASE)
+            if m:
+                img = m.group(1).strip()
+                if img.startswith("http"): return img
+    except Exception:
+        pass
+    return ""
+
+def _enrich_with_images(articles: list) -> list:
+    """Fetch og:image for all articles in parallel using threads."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Only enrich articles missing an image
+    needs_image = [i for i, a in enumerate(articles) if not a.get("urlToImage")]
+    if not needs_image:
+        return articles
+
+    result = articles[:]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(_fetch_og_image, articles[i]["url"]): i for i in needs_image}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                img = future.result()
+                if img:
+                    result[idx] = {**result[idx], "urlToImage": img}
+            except Exception:
+                pass
+    return result
+
 def _rss_for_query(query: str, lang: str, limit: int) -> list:
-    """Use Google News RSS to search by query — unlimited, no key."""
-    return _parse_rss(_google_news_rss(query, lang), limit=limit)
+    """Google News RSS search → enrich with og:image in parallel."""
+    articles = _parse_rss(_google_news_rss(query, lang), limit=limit)
+    return _enrich_with_images(articles)
 
 def _rss_for_category(category: str, limit: int) -> list:
     """Pull from curated RSS feeds for a category."""
